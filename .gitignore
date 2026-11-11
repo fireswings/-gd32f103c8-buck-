@@ -1,0 +1,19 @@
+# build output
+/build/
+
+# object / image files
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.su
+
+# tooling caches
+/.cache/
+/.clangd/
+compile_commands.json
+
+# editor
+/.vscode/
+/.idea/

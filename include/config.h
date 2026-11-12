@@ -3,10 +3,12 @@
 
 /* ---- power stage ---- */
 #define PWM_PERIOD 120U       /* center-aligned, 72 MHz / (2 * 120) = 300 kHz */
-#define VOUT_SET_MV 3300U     /* output voltage setpoint */
+#define VOUT_SET_MV 3300U     /* power-on output voltage setpoint */
+#define VOUT_MAX_MV 4500U     /* upper limit accepted from the UART command */
 
-/* ---- voltage sense: PA2 = ADC0_IN2, divider 4:1 ---- */
-#define VOLTAGE_RATIO 4U
+/* ---- voltage sense: PA2 = ADC0_IN2, Vout = Vpin * 4.3 ---- */
+#define VOLTAGE_RATIO_NUM 43U
+#define VOLTAGE_RATIO_DEN 10U
 
 /* ---- current sense: PA3 = ADC0_IN3, INA240A1 ---- */
 #define SHUNT_MILLIOHM 10U

@@ -18,4 +18,9 @@ void control_init(void);
 /* Snapshot of the control state for logging. */
 void control_get_state(control_state_t *state);
 
+/* Change the target voltage while running.  The soft-start ramp moves the
+   internal setpoint toward it; values above VOUT_MAX_MV are rejected. */
+int control_set_vout_mv(uint32_t mv);
+uint32_t control_get_vout_mv(void);
+
 #endif /* GD32_CONTROL_H */

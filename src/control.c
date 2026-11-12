@@ -13,8 +13,9 @@
 
 #define CTRL_HZ        10000U
 #define CTRL_PERIOD_US (1000000U / CTRL_HZ)
-#define OVP_MARGIN_MV  1900U     /* trip at set + 1.9 V */
-#define SOFTSTART_MV   1U        /* 1 mV per tick -> ~330 ms ramp */
+#define OVP_MARGIN_MV  1900U     /* trip at the ramped setpoint + 1.9 V */
+#define OVP_ABS_MAX_MV 5200U     /* but never allow the trip point above 5.2 V */
+#define SOFTSTART_MV   1U        /* 1 mV per tick -> ~330 ms full-scale ramp */
 
 /* Outer voltage loop: V -> I_ref (mA).  Runs at CTRL_HZ / V_LOOP_DIV. */
 #define V_LOOP_DIV     10U
@@ -35,6 +36,7 @@ volatile uint32_t g_v_mv;
 volatile uint32_t g_i_ma;
 volatile uint32_t g_i_ref_ma;
 volatile uint32_t g_set_mv;
+volatile uint32_t g_v_target_mv = VOUT_SET_MV;
 volatile uint32_t g_duty_q16;
 volatile uint32_t g_duty_counts;
 volatile uint16_t g_v_raw;
@@ -52,16 +54,23 @@ static void control_tick(void)
     uint32_t i_raw;
     uint32_t v_raw;
     uint32_t v_mv;
+    uint32_t ovp_mv;
     int32_t i_ma;
     int32_t i_err;
     int32_t duty_q16;
     int32_t ff_q16;
 
-    /* Soft start: 1 mV per 100 us tick. */
-    if (g_set_mv < VOUT_SET_MV) {
+    /* Soft start/stop: 1 mV per 100 us tick toward the live target. */
+    if (g_set_mv < g_v_target_mv) {
         g_set_mv += SOFTSTART_MV;
-        if (g_set_mv > VOUT_SET_MV) {
-            g_set_mv = VOUT_SET_MV;
+        if (g_set_mv > g_v_target_mv) {
+            g_set_mv = g_v_target_mv;
+        }
+    } else if (g_set_mv > g_v_target_mv) {
+        if ((g_set_mv - g_v_target_mv) <= SOFTSTART_MV) {
+            g_set_mv = g_v_target_mv;
+        } else {
+            g_set_mv -= SOFTSTART_MV;
         }
     }
 
@@ -75,11 +84,19 @@ static void control_tick(void)
 
     v_raw = adc_sample(ADC_CHANNEL_2, ADC_SAMPLETIME_55POINT5);
     g_v_raw = (uint16_t)v_raw;
-    v_mv = ((v_raw * adc_vdda_mv()) / ADC_FULL_SCALE) * VOLTAGE_RATIO;
+    /* One division keeps the fractional divider ratio (4.3) exact. */
+    v_mv = ((v_raw * adc_vdda_mv()) * VOLTAGE_RATIO_NUM) /
+           (ADC_FULL_SCALE * VOLTAGE_RATIO_DEN);
     g_v_mv = v_mv;
 
-    /* Over-voltage protection, referred to the final setpoint. */
-    if (v_mv > (VOUT_SET_MV + OVP_MARGIN_MV)) {
+    /* Over-voltage protection, referred to the ramped setpoint so that a
+       downward voltage change is not mistaken for an over-voltage event.
+       The absolute clamp retains protection when the target is near 4.5 V. */
+    ovp_mv = g_set_mv + OVP_MARGIN_MV;
+    if (ovp_mv > OVP_ABS_MAX_MV) {
+        ovp_mv = OVP_ABS_MAX_MV;
+    }
+    if (v_mv > ovp_mv) {
         g_ovp_count++;
         s_i_ref_q8 = 0;
         s_i_integ_q16 = 0;
@@ -187,4 +204,18 @@ void control_get_state(control_state_t *state)
     state->iref_ma = g_i_ref_ma;
     state->duty_q16 = g_duty_q16;
     state->set_mv = g_set_mv;
+}
+
+int control_set_vout_mv(uint32_t mv)
+{
+    if (mv > VOUT_MAX_MV) {
+        return 0;
+    }
+    g_v_target_mv = mv;
+    return 1;
+}
+
+uint32_t control_get_vout_mv(void)
+{
+    return g_v_target_mv;
 }

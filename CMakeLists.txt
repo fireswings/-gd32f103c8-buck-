@@ -21,6 +21,7 @@ set(PERIPHERAL_SOURCES
 add_executable(${PROJECT_NAME}
     src/main.c
     src/control.c
+    src/protocol.c
     src/adc_sense.c
     src/pwm.c
     src/uart.c

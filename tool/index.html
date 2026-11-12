@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#071019">
+  <meta name="description" content="通过 Web Serial 连接 GD32 Buck 控制器，实时绘制电压电流波形并设置输出电压。">
+  <title>BuckScope · 串口波形与输出电压</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1722'/%3E%3Cpath d='M10 34h9l5-14 8 27 6-19 4 6h12' fill='none' stroke='%2351e5a8' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="js/boot-guard.js" defer></script>
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <div class="ambient-grid" aria-hidden="true"></div>
+
+  <section class="boot-warning" id="bootWarning" hidden>
+    <div class="boot-warning-card">
+      <p class="eyebrow">ES MODULE BOOT FAILURE</p>
+      <h2>请通过本地服务器打开</h2>
+      <p>浏览器的安全策略禁止从 <code>file://</code> 加载 ES 模块。请在项目根目录运行：</p>
+      <pre><code>python -m http.server 8000 -d tool</code></pre>
+      <p>然后访问 <strong>http://localhost:8000/</strong>。</p>
+    </div>
+  </section>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" role="img">
+            <path d="M5 26h8l4.5-12 7 23 5.5-16 3.5 5H43" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <div class="eyebrow">GD32F103 · SYNCHRONOUS BUCK</div>
+          <h1>BuckScope <span>串口波形台</span></h1>
+        </div>
+      </div>
+
+      <div class="connection-cluster">
+        <span class="env-badge" id="envBadge" title="正在检查浏览器能力">
+          <i aria-hidden="true"></i>
+          <span id="envText">检查环境…</span>
+        </span>
+        <label class="select-field" for="baudRate">
+          <span>波特率</span>
+          <select id="baudRate" autocomplete="off">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="38400">38400</option>
+            <option value="57600">57600</option>
+            <option value="115200" selected>115200</option>
+            <option value="230400">230400</option>
+            <option value="460800">460800</option>
+            <option value="921600">921600</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" id="connectBtn" type="button">
+          <span class="btn-led" aria-hidden="true"></span>
+          <span id="connectLabel">连接串口</span>
+        </button>
+        <button class="btn btn-quiet" id="demoBtn" type="button">演示</button>
+      </div>
+    </header>
+
+    <main class="dashboard">
+      <section class="panel scope-panel" aria-labelledby="scopeTitle">
+        <div class="panel-head scope-head">
+          <div>
+            <div class="heading-line">
+              <h2 id="scopeTitle">实时波形</h2>
+              <span class="live-state" id="liveBadge" data-state="offline" role="status" aria-live="polite">
+                <i aria-hidden="true"></i>
+                <span id="liveText">未连接</span>
+              </span>
+            </div>
+            <p class="panel-subtitle" id="portInfo">等待选择串口设备</p>
+          </div>
+          <div class="toolbar" aria-label="波形工具">
+            <label class="select-field compact" for="timeWindow">
+              <span>时间窗</span>
+              <select id="timeWindow">
+                <option value="5">5 秒</option>
+                <option value="10" selected>10 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+            </label>
+            <button class="btn btn-tool" id="pauseBtn" type="button" disabled>冻结</button>
+            <button class="btn btn-tool" id="exportBtn" type="button" disabled>导出 CSV</button>
+            <button class="btn btn-tool" id="clearBtn" type="button" disabled>清空</button>
+          </div>
+        </div>
+
+        <div class="metric-strip">
+          <article class="metric">
+            <div class="metric-top"><span>输出电压</span><i class="metric-mark voltage" aria-hidden="true"></i></div>
+            <div class="metric-value"><span id="metricV">--</span><small>V</small></div>
+            <div class="metric-foot" id="metricVFoot">设定 -- V</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>输出电流</span><i class="metric-mark current" aria-hidden="true"></i></div>
+            <div class="metric-value"><span id="metricI">--</span><small>A</small></div>
+            <div class="metric-foot" id="metricIFoot">Iref -- A</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>输出功率</span><i class="metric-mark power" aria-hidden="true"></i></div>
+            <div class="metric-value"><span id="metricP">--</span><small>W</small></div>
+            <div class="metric-foot">Vout × Iout</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>占空比</span><i class="metric-mark duty" aria-hidden="true"></i></div>
+            <div class="metric-value"><span id="metricD">--</span><small>%</small></div>
+            <div class="metric-foot" id="metricDFoot">内环输出</div>
+          </article>
+        </div>
+
+        <div class="chart-shell" id="chartShell">
+          <canvas id="chart" role="img" aria-label="输出电压、输出电流与回路设定值的实时滚动波形">
+            当前浏览器不支持 Canvas，无法显示波形。
+          </canvas>
+          <div class="chart-empty" id="chartEmpty">
+            <div class="empty-graphic" aria-hidden="true">
+              <svg viewBox="0 0 96 48">
+                <path d="M2 37h19l6-20 10 31 9-25 8 14h10l6-11 9 11h15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <p class="empty-title" id="emptyTitle">等待遥测数据</p>
+            <p class="empty-copy" id="emptyCopy">连接串口，或播放一段演示波形预览这个工具。</p>
+            <button class="btn btn-ghost" id="emptyDemoBtn" type="button">播放演示</button>
+          </div>
+          <div class="chart-tooltip" id="chartTooltip" hidden>
+            <div class="tooltip-time" id="tipTime">—</div>
+            <div class="tooltip-row voltage"><span><i></i>Vout</span><b id="tipV">—</b></div>
+            <div class="tooltip-row current"><span><i></i>Iout</span><b id="tipI">—</b></div>
+            <div class="tooltip-row setpoint"><span><i></i>回路设定</span><b id="tipSet">—</b></div>
+            <div class="tooltip-row duty"><span><i></i>占空比</span><b id="tipD">—</b></div>
+          </div>
+        </div>
+
+        <div class="chart-footer">
+          <div class="legend" id="legend" aria-label="显示曲线">
+            <label class="series-toggle">
+              <input type="checkbox" data-series="voltage" checked>
+              <span class="swatch voltage" aria-hidden="true"></span>输出电压
+            </label>
+            <label class="series-toggle">
+              <input type="checkbox" data-series="current" checked>
+              <span class="swatch current" aria-hidden="true"></span>输出电流
+            </label>
+            <label class="series-toggle">
+              <input type="checkbox" data-series="setpoint" checked>
+              <span class="swatch setpoint" aria-hidden="true"></span>回路设定
+            </label>
+          </div>
+          <div class="chart-readout">
+            <span class="hover-readout" id="hoverReadout">悬停波形读数</span>
+            <span class="chart-rate" id="chartRate">0.0 Hz</span>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side-column">
+        <section class="panel setpoint-panel" aria-labelledby="setpointTitle">
+          <div class="panel-head small">
+            <div>
+              <h2 id="setpointTitle">输出电压</h2>
+              <p class="panel-subtitle">下发到 MCU 的电压目标</p>
+            </div>
+            <span class="protocol-badge">SET mV</span>
+          </div>
+
+          <div class="loop-setpoint">
+            <div>
+              <span class="loop-label">回路设定<small>遥测</small></span>
+              <strong><span id="loopSet">--</span><small>V</small></strong>
+            </div>
+            <span class="feedback-badge" id="feedbackBadge">离线</span>
+          </div>
+
+          <div class="setpoint-form">
+            <label for="voltageInput">目标电压</label>
+            <div class="voltage-control">
+              <button class="step-btn" id="voltageMinus" type="button" aria-label="降低 0.05 V">−</button>
+              <div class="voltage-input-wrap">
+                <input id="voltageInput" type="number" min="0" max="4.5" step="0.01" value="3.30" inputmode="decimal" autocomplete="off" aria-describedby="voltageHint">
+                <span>V</span>
+              </div>
+              <button class="step-btn" id="voltagePlus" type="button" aria-label="提高 0.05 V">+</button>
+            </div>
+
+            <input class="voltage-slider" id="voltageSlider" type="range" min="0" max="4.5" step="0.01" value="3.30" aria-label="目标输出电压滑杆">
+            <div class="slider-labels"><span>0 V</span><span>4.50 V</span></div>
+
+            <div class="preset-row" aria-label="电压快捷值">
+              <button type="button" data-preset="1.20">1.20</button>
+              <button type="button" data-preset="1.80">1.80</button>
+              <button type="button" data-preset="2.50">2.50</button>
+              <button type="button" data-preset="3.30" class="active">3.30</button>
+            </div>
+
+            <button class="btn btn-accent apply-btn" id="applyBtn" type="button" disabled>
+              <span id="applyLabel">应用输出电压</span>
+            </button>
+            <p class="field-hint" id="voltageHint">连接串口后可下发命令。</p>
+            <p class="voltage-warning" id="voltageWarning" hidden>目标高于 3.60 V，请先确认功率级和负载耐压。</p>
+            <div class="command-status" id="commandStatus" role="status" aria-live="polite" hidden></div>
+          </div>
+        </section>
+
+        <section class="panel link-panel" aria-labelledby="linkTitle">
+          <div class="panel-head small">
+            <h2 id="linkTitle">链路状态</h2>
+            <span class="pill" id="serialPill">离线</span>
+          </div>
+          <dl class="detail-list">
+            <div><dt>串口</dt><dd id="deviceDetail">—</dd></div>
+            <div><dt>格式</dt><dd id="formatDetail">115200 · 8N1</dd></div>
+            <div><dt>遥测速率</dt><dd id="rateDetail">—</dd></div>
+            <div><dt>样本</dt><dd id="sampleDetail">0</dd></div>
+            <div><dt>解析异常</dt><dd id="errorDetail">0</dd></div>
+            <div><dt>最后数据</dt><dd id="lastRxDetail">—</dd></div>
+          </dl>
+        </section>
+
+        <section class="panel protocol-panel" aria-labelledby="protocolTitle">
+          <div class="panel-head small">
+            <h2 id="protocolTitle">串口协议</h2>
+            <button class="text-btn" id="rawToggleBtn" type="button" aria-expanded="false" aria-controls="rawPanel">原始日志</button>
+          </div>
+          <div class="protocol-row">
+            <code>V=3.300V I=0.123A …</code>
+            <span>50 Hz 遥测</span>
+          </div>
+          <div class="protocol-row">
+            <code>SET 3300</code>
+            <span>设置 3.300 V</span>
+          </div>
+          <div class="protocol-row">
+            <code>GET</code>
+            <span>读取当前目标</span>
+          </div>
+          <p class="protocol-note">ASCII 行命令，CRLF 结尾，单位 mV。固件允许范围 0–4500 mV。</p>
+        </section>
+      </aside>
+
+      <section class="panel raw-panel" id="rawPanel" aria-labelledby="rawTitle" hidden>
+        <div class="panel-head small">
+          <div>
+            <h2 id="rawTitle">串口原始日志</h2>
+            <p class="panel-subtitle">接收、发送与页面的系统消息；最多保留最近 600 条</p>
+          </div>
+          <div class="raw-actions">
+            <button class="btn btn-tool" id="rawCopyBtn" type="button">复制</button>
+            <button class="btn btn-tool" id="rawClearBtn" type="button">清空日志</button>
+            <button class="icon-btn" id="rawCloseBtn" type="button" aria-label="关闭原始日志">×</button>
+          </div>
+        </div>
+        <div class="raw-log" id="rawLog" role="log" aria-live="off"></div>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <span>BuckScope · 本地 Web Serial 工具</span>
+      <span class="footer-sep" aria-hidden="true"></span>
+      <span>数据不离开浏览器</span>
+      <span class="footer-grow"></span>
+      <span id="footerHint">需要 Chrome / Edge，并通过 localhost 或 HTTPS 打开</span>
+    </footer>
+  </div>
+
+  <div class="toast-region" id="toastRegion" role="status" aria-live="polite"></div>
+
+  <noscript>
+    <div class="noscript">此工具需要启用 JavaScript；并通过本地 HTTP 服务器打开。</div>
+  </noscript>
+</body>
+</html>

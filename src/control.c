@@ -13,15 +13,27 @@
 
 #define CTRL_HZ        10000U
 #define CTRL_PERIOD_US (1000000U / CTRL_HZ)
-#define OVP_MARGIN_MV  1900U     /* trip at the ramped setpoint + 1.9 V */
-#define OVP_ABS_MAX_MV 5200U     /* but never allow the trip point above 5.2 V */
 #define SOFTSTART_MV   1U        /* 1 mV per tick -> ~330 ms full-scale ramp */
+
+/* Over-voltage protection: trip a fixed margin above the ramped setpoint,
+   after it has persisted for 2 ms so load steps do not false-trip it. */
+#define OVP_MARGIN_MV      700U
+#define OVP_ABS_MAX_MV     5200U
+#define OVP_DEBOUNCE_TICKS 20U
+
+/* Over-current protection: two consecutive valley samples above the limit. */
+#define OCP_DEBOUNCE_TICKS 2U
+
+/* A latched fault keeps the PWM off for 2 s, then restarts through the soft
+   start so the converter can recover from a transient without operator action. */
+#define FAULT_RETRY_TICKS (2000U * (CTRL_HZ / 1000U))
 
 /* Outer voltage loop: V -> I_ref (mA).  Runs at CTRL_HZ / V_LOOP_DIV. */
 #define V_LOOP_DIV     10U
 #define KP_V_Q8_PER_MV 128       /* 0.5 mA/mV */
 #define KI_V_Q8_PER_MV 16        /* Q8 mA per mV per outer tick */
 #define I_REF_MAX_MA   6000U
+#define I_REF_SLEW_MA  100U      /* 100 mA per outer tick -> 100 A/s */
 
 /* Inner current loop: I -> duty.  Q16 duty counts, 1 count = 100 mV. */
 #define KP_I_Q16_PER_MA 197      /* ~3 duty counts per A */
@@ -42,12 +54,39 @@ volatile uint32_t g_duty_counts;
 volatile uint16_t g_v_raw;
 volatile uint16_t g_i_raw;
 volatile uint32_t g_ctrl_ticks;
-volatile uint32_t g_ovp_count;
+volatile uint32_t g_fault;          /* latched fault bits */
+volatile uint32_t g_fault_trips;    /* total trip count */
 
-static int32_t s_i_ref_q8;     /* outer integrator, Q8 mA */
-static int32_t s_i_integ_q16;  /* inner integrator, Q16 counts */
-static int32_t s_applied_q16;
-static int32_t s_v_filt_mv;
+static uint32_t s_fault_events;     /* pending events for the protocol layer */
+static uint32_t s_retry_ticks;
+static uint32_t s_ovp_ticks;
+static uint32_t s_ocp_ticks;
+static int32_t  s_i_ref_q8;         /* outer integrator, Q8 mA */
+static int32_t  s_i_ref_prev;       /* previous reference, for the slew limit */
+static int32_t  s_i_integ_q16;      /* inner integrator, Q16 counts */
+static int32_t  s_applied_q16;
+static int32_t  s_v_filt_mv;
+
+/* Cut the output and latch the fault; recovery is a full soft start. */
+static void control_trip(uint32_t fault)
+{
+    g_fault |= fault;
+    g_fault_trips++;
+    s_fault_events |= fault;
+
+    s_i_ref_q8 = 0;
+    s_i_ref_prev = 0;
+    s_i_integ_q16 = 0;
+    s_applied_q16 = 0;
+    s_ovp_ticks = 0;
+    s_ocp_ticks = 0;
+    g_i_ref_ma = 0U;
+    g_duty_q16 = 0U;
+    g_duty_counts = 0U;
+    pwm_set_duty(0U);
+
+    s_retry_ticks = FAULT_RETRY_TICKS;
+}
 
 static void control_tick(void)
 {
@@ -59,6 +98,20 @@ static void control_tick(void)
     int32_t i_err;
     int32_t duty_q16;
     int32_t ff_q16;
+
+    /* Latched fault: output stays off, restart softly after the cool-down. */
+    if (g_fault != 0U) {
+        pwm_set_duty(0U);
+        if (s_retry_ticks > 0U) {
+            s_retry_ticks--;
+        }
+        if (s_retry_ticks == 0U) {
+            g_fault = 0U;
+            g_set_mv = 0U;                      /* restart through soft start */
+            s_fault_events |= CONTROL_FAULT_CLEARED;
+        }
+        return;
+    }
 
     /* Soft start/stop: 1 mV per 100 us tick toward the live target. */
     if (g_set_mv < g_v_target_mv) {
@@ -82,6 +135,15 @@ static void control_tick(void)
                      (1000U / (SHUNT_MILLIOHM * AMP_GAIN)));
     g_i_ma = (uint32_t)i_ma;
 
+    if (i_ma > (int32_t)I_LIMIT_MA) {
+        if (++s_ocp_ticks >= OCP_DEBOUNCE_TICKS) {
+            control_trip(CONTROL_FAULT_OCP);
+            return;
+        }
+    } else {
+        s_ocp_ticks = 0;
+    }
+
     v_raw = adc_sample(ADC_CHANNEL_2, ADC_SAMPLETIME_55POINT5);
     g_v_raw = (uint16_t)v_raw;
     /* One division keeps the fractional divider ratio (4.3) exact. */
@@ -90,21 +152,18 @@ static void control_tick(void)
     g_v_mv = v_mv;
 
     /* Over-voltage protection, referred to the ramped setpoint so that a
-       downward voltage change is not mistaken for an over-voltage event.
-       The absolute clamp retains protection when the target is near 4.5 V. */
+       downward voltage change is not mistaken for an over-voltage event. */
     ovp_mv = g_set_mv + OVP_MARGIN_MV;
     if (ovp_mv > OVP_ABS_MAX_MV) {
         ovp_mv = OVP_ABS_MAX_MV;
     }
     if (v_mv > ovp_mv) {
-        g_ovp_count++;
-        s_i_ref_q8 = 0;
-        s_i_integ_q16 = 0;
-        g_i_ref_ma = 0U;
-        g_duty_q16 = 0U;
-        g_duty_counts = 0U;
-        pwm_set_duty(0U);
-        return;
+        if (++s_ovp_ticks >= OVP_DEBOUNCE_TICKS) {
+            control_trip(CONTROL_FAULT_OVP);
+            return;
+        }
+    } else {
+        s_ovp_ticks = 0;
     }
 
     /* One-pole low pass (~200 Hz): neither loop may have gain at the 1.6 kHz
@@ -129,11 +188,22 @@ static void control_tick(void)
         } else if (iref > (int32_t)I_REF_MAX_MA) {
             iref = (int32_t)I_REF_MAX_MA;
         }
+
+        /* Slew-limit the reference so a large error cannot slam the duty. */
+        if (iref > (s_i_ref_prev + (int32_t)I_REF_SLEW_MA)) {
+            iref = s_i_ref_prev + (int32_t)I_REF_SLEW_MA;
+        } else if (iref < (s_i_ref_prev - (int32_t)I_REF_SLEW_MA)) {
+            iref = s_i_ref_prev - (int32_t)I_REF_SLEW_MA;
+        }
+        s_i_ref_prev = iref;
         g_i_ref_ma = (uint32_t)iref;
     }
 
     /* ---------- inner loop: current -> duty ---------- */
-    ff_q16 = (s_v_filt_mv * 65536) / 100;   /* Vout / 100 mV per count */
+    /* Feed-forward against the setpoint, not the measurement: with the measured
+       voltage the duty would exactly sustain whatever the output already is,
+       so an unloaded converter could never come back down. */
+    ff_q16 = ((int32_t)g_set_mv * 65536) / 100;   /* Vout / 100 mV per count */
     i_err = (int32_t)g_i_ref_ma - i_ma;
 
     duty_q16 = ff_q16 + s_i_integ_q16 + (i_err * KP_I_Q16_PER_MA);
@@ -204,6 +274,18 @@ void control_get_state(control_state_t *state)
     state->iref_ma = g_i_ref_ma;
     state->duty_q16 = g_duty_q16;
     state->set_mv = g_set_mv;
+}
+
+uint32_t control_take_fault_event(void)
+{
+    uint32_t events = s_fault_events;
+    s_fault_events = 0U;
+    return events;
+}
+
+uint32_t control_get_fault(void)
+{
+    return g_fault;
 }
 
 int control_set_vout_mv(uint32_t mv)

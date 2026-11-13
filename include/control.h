@@ -23,4 +23,16 @@ void control_get_state(control_state_t *state);
 int control_set_vout_mv(uint32_t mv);
 uint32_t control_get_vout_mv(void);
 
+/* Latched protection events.  A trip cuts the PWM, waits 2 s and then restarts
+   through the soft start; the protocol layer reports the transitions. */
+#define CONTROL_FAULT_OCP     0x01U
+#define CONTROL_FAULT_OVP     0x02U
+#define CONTROL_FAULT_CLEARED 0x100U
+
+/* Active latched fault bits (0 when the converter is running normally). */
+uint32_t control_get_fault(void);
+
+/* Consume the pending fault transitions (CONTROL_FAULT_* | CLEARED). */
+uint32_t control_take_fault_event(void);
+
 #endif /* GD32_CONTROL_H */

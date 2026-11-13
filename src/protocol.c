@@ -119,9 +119,23 @@ void protocol_init(void)
 void protocol_poll(void)
 {
     char line[PROTOCOL_LINE_SIZE];
+    uint32_t events;
 
     while (uart_read_line(line, sizeof(line)) != 0) {
         handle_command(line);
+    }
+
+    /* Protection transitions are reported as unsolicited info lines; they are
+       not part of the telemetry contract and parsing them is optional. */
+    events = control_take_fault_event();
+    if ((events & CONTROL_FAULT_OCP) != 0U) {
+        uart_printf("# FLT OCP\r\n");
+    }
+    if ((events & CONTROL_FAULT_OVP) != 0U) {
+        uart_printf("# FLT OVP\r\n");
+    }
+    if ((events & CONTROL_FAULT_CLEARED) != 0U) {
+        uart_printf("# FLT CLR\r\n");
     }
 }
 
